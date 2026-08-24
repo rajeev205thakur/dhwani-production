@@ -143,12 +143,12 @@ app.post('/api/upload-audio', upload.single('audio'), async (req, res) => {
   const outputFilename = `${Date.now()}-${email.replace(/[^a-zA-Z0-9]/g, '_')}-${language}-chunk${chunkIndex}.wav`;
   const outputPath = path.join(UPLOADS_DIR, outputFilename);
 
+  // Removed afftdn (Noise Reduction) because it consumes too much RAM and crashes Render Free Tier
   ffmpeg(file.path)
     .toFormat('wav')
     .audioChannels(1)
     .audioFrequency(44100)
     .audioCodec('pcm_s16le')
-    .audioFilters('afftdn')
     .on('end', async () => {
       console.log(`Successfully converted ${file.path} to ${outputPath}`);
       if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
