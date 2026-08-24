@@ -82,15 +82,19 @@ app.post('/api/login', async (req, res) => {
     if (userRows.length > 0) {
       const profiles = userRows.map(row => {
         const chunks = [];
-        for (let i = 1; i <= 50; i++) {
-          const status = row.get(`Audio ${i}`);
-          const feedback = row.get(`Audio ${i} Feedback`);
-          if (status !== undefined || i <= 24) {
+        let i = 1;
+        while (true) {
+          const statusVal = row.get(`Audio ${i}`);
+          if (statusVal !== undefined && statusVal !== null && statusVal !== '') {
+             const clientStatus = row.get(`Audio ${i} Status`);
+             const feedback = row.get(`Audio ${i} Feedback`);
              chunks.push({
                index: i,
-               status: status || null,
+               link: statusVal,
+               status: clientStatus || null,
                feedback: feedback || null
              });
+             i++;
           } else {
              break;
           }
@@ -114,11 +118,10 @@ app.post('/api/login', async (req, res) => {
       const newRow = { 'Name': name, 'Email ID': email, 'Language': 'Not Assigned' };
       await sheet.addRow(newRow);
       
-      const defaultChunks = Array.from({length: 24}, (_, i) => ({ index: i+1, status: null, feedback: null }));
       return res.json({
         success: true,
         user: { name, email },
-        profiles: [{ language: 'Not Assigned', chunks: defaultChunks }]
+        profiles: [{ language: 'Not Assigned', chunks: [] }]
       });
     }
   } catch (error) {
@@ -126,6 +129,11 @@ app.post('/api/login', async (req, res) => {
     res.status(500).json({ error: 'Server error during login' });
   }
 });
+
+import { v2 as cloudinary } from 'cloudinary';
+
+// Configure cloudinary (automatically uses CLOUDINARY_URL from env)
+cloudinary.config({ secure: true });
 
 // 2. Upload Audio Chunk
 app.post('/api/upload-audio', upload.single('audio'), async (req, res) => {
@@ -152,6 +160,7 @@ app.post('/api/upload-audio', upload.single('audio'), async (req, res) => {
       try {
         // Upload to Google Drive
         let driveFileId = null;
+        let driveUrl = '';
         if (process.env.GOOGLE_DRIVE_FOLDER_ID) {
           const driveAuth = new google.auth.GoogleAuth({
             credentials: {
@@ -163,30 +172,60 @@ app.post('/api/upload-audio', upload.single('audio'), async (req, res) => {
           const drive = google.drive({ version: 'v3', auth: driveAuth });
           
           const driveRes = await drive.files.create({
-            resource: { name: outputFilename, parents: [process.env.GOOGLE_DRIVE_FOLDER_ID] },
+            resource: { 
+              name: outputFilename, 
+              parents: [process.env.GOOGLE_DRIVE_FOLDER_ID] 
+            },
             media: { mimeType: 'audio/wav', body: fs.createReadStream(outputPath) },
-            fields: 'id'
+            fields: 'id, webViewLink'
           });
           driveFileId = driveRes.data.id;
-          console.log(`Uploaded to Drive: ${driveFileId}`);
+          driveUrl = `https://drive.google.com/file/d/${driveFileId}/view`;
+          console.log(`Uploaded to Drive: ${driveUrl}`);
           
-          // Delete local converted file since it's on Drive now
+          // Try to make it publicly readable so clients can listen without logging in
+          try {
+            await drive.permissions.create({
+              fileId: driveFileId,
+              requestBody: { role: 'reader', type: 'anyone' }
+            });
+          } catch (permErr) {
+            console.error('Could not set public permission:', permErr.message);
+          }
+          
           if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
         }
 
         const sheet = await getSheet();
         if (sheet) {
+          // Check and add missing headers
+          await sheet.loadHeaderRow();
+          const headerValues = sheet.headerValues;
+          let headersChanged = false;
+          const requiredHeaders = [`Audio ${chunkIndex}`, `Audio ${chunkIndex} Status`, `Audio ${chunkIndex} Feedback`];
+          for (const header of requiredHeaders) {
+            if (!headerValues.includes(header)) {
+              headerValues.push(header);
+              headersChanged = true;
+            }
+          }
+          if (headersChanged) {
+            await sheet.setHeaderRow(headerValues);
+          }
+
           const rows = await sheet.getRows();
           const userRow = rows.find(r => r.get('Email ID') === email && (r.get('Language') || 'Not Assigned') === language);
           if (userRow) {
-            userRow.set(`Audio ${chunkIndex}`, 'Uploaded');
+            userRow.set(`Audio ${chunkIndex}`, `=HYPERLINK("${driveUrl}", "Listen")`);
+            userRow.set(`Audio ${chunkIndex} Status`, 'Pending');
+            userRow.set(`Audio ${chunkIndex} Feedback`, '');
             await userRow.save();
           }
         }
-        res.json({ success: true, message: 'Audio processed and saved to Drive', status: 'Uploaded' });
+        res.json({ success: true, message: 'Audio processed and saved to Google Drive', status: 'Pending' });
       } catch (error) {
-        console.error('Error during Drive/Sheet update:', error);
-        res.json({ success: true, message: 'Audio saved, but update failed', status: 'Uploaded' });
+        console.error('Error during Sheet update:', error);
+        res.json({ success: true, message: 'Audio saved, but update failed', status: 'Pending' });
       }
     })
     .on('error', (err) => {
