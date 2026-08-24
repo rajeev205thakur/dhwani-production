@@ -196,7 +196,7 @@ app.post('/api/upload-audio', upload.single('audio'), async (req, res) => {
     .save(outputPath);
 });
 
-app.listen(PORT, () => {
-  console.log(`Backend server running on http://localhost:${PORT}`);
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Backend server running on port ${PORT}`);
   console.log(`Uploads will be saved to ${UPLOADS_DIR}`);
 });
