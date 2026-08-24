@@ -114,15 +114,8 @@ app.post('/api/login', async (req, res) => {
         profiles
       });
     } else {
-      // New user
-      const newRow = { 'Name': name, 'Email ID': email, 'Language': 'Not Assigned' };
-      await sheet.addRow(newRow);
-      
-      return res.json({
-        success: true,
-        user: { name, email },
-        profiles: [{ language: 'Not Assigned', chunks: [] }]
-      });
+      // Reject new users
+      return res.status(401).json({ error: 'Your email is not in the approved list. Please contact the administrator.' });
     }
   } catch (error) {
     console.error('Login error:', error);
