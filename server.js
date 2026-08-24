@@ -154,43 +154,31 @@ app.post('/api/upload-audio', upload.single('audio'), async (req, res) => {
       if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
 
       try {
-        // Upload to Google Drive
-        let driveFileId = null;
-        let driveUrl = '';
-        if (process.env.GOOGLE_DRIVE_FOLDER_ID) {
-          const driveAuth = new google.auth.GoogleAuth({
-            credentials: {
-              client_email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-              private_key: process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
-            },
-            scopes: ['https://www.googleapis.com/auth/drive.file'],
-          });
-          const drive = google.drive({ version: 'v3', auth: driveAuth });
-          
-          const driveRes = await drive.files.create({
-            resource: { 
-              name: outputFilename, 
-              parents: [process.env.GOOGLE_DRIVE_FOLDER_ID] 
-            },
-            media: { mimeType: 'audio/wav', body: fs.createReadStream(outputPath) },
-            fields: 'id, webViewLink'
-          });
-          driveFileId = driveRes.data.id;
-          driveUrl = `https://drive.google.com/file/d/${driveFileId}/view`;
-          console.log(`Uploaded to Drive: ${driveUrl}`);
-          
-          // Try to make it publicly readable so clients can listen without logging in
-          try {
-            await drive.permissions.create({
-              fileId: driveFileId,
-              requestBody: { role: 'reader', type: 'anyone' }
-            });
-          } catch (permErr) {
-            console.error('Could not set public permission:', permErr.message);
-          }
-          
-          if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
+        // Read the WAV file as Base64
+        const fileBuffer = fs.readFileSync(outputPath);
+        const base64Audio = fileBuffer.toString('base64');
+
+        // Send to Google Apps Script
+        const gasUrl = 'https://script.google.com/macros/s/AKfycbzh-jOOR4k3JJkVwYb0bgBH2wjCaTc3jCLRUgNSyLq7XxKvAd7CArYL8TUf8HaqNzDh/exec';
+        
+        console.log('Uploading to Google Drive via Apps Script...');
+        const gasRes = await fetch(gasUrl, {
+          method: 'POST',
+          body: JSON.stringify({
+            filename: outputFilename,
+            base64Audio: base64Audio
+          })
+        });
+        
+        const gasData = await gasRes.json();
+        if (!gasData.success) {
+          throw new Error(gasData.error || 'Failed to upload to Drive via GAS');
         }
+
+        const driveUrl = gasData.url;
+        console.log(`Uploaded to Drive successfully: ${driveUrl}`);
+        
+        if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
 
         const sheet = await getSheet();
         if (sheet) {
@@ -220,7 +208,7 @@ app.post('/api/upload-audio', upload.single('audio'), async (req, res) => {
         }
         res.json({ success: true, message: 'Audio processed and saved to Google Drive', status: 'Pending' });
       } catch (error) {
-        console.error('Error during Sheet update:', error);
+        console.error('Error during upload/sheet update:', error);
         res.json({ success: true, message: 'Audio saved, but update failed', status: 'Pending' });
       }
     })
