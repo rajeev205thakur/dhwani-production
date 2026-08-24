@@ -90,7 +90,7 @@ app.post('/api/login', async (req, res) => {
              const feedback = row.get(`Audio ${i} Feedback`);
              chunks.push({
                index: i,
-               link: statusVal,
+               link: typeof statusVal === 'string' ? statusVal.replace('=HYPERLINK("', '').replace('", "Listen")', '') : statusVal,
                status: clientStatus || null,
                feedback: feedback || null
              });
@@ -200,7 +200,7 @@ app.post('/api/upload-audio', upload.single('audio'), async (req, res) => {
           const rows = await sheet.getRows();
           const userRow = rows.find(r => r.get('Email ID') === email && (r.get('Language') || 'Not Assigned') === language);
           if (userRow) {
-            userRow.set(`Audio ${chunkIndex}`, `=HYPERLINK("${driveUrl}", "Listen")`);
+            userRow.set(`Audio ${chunkIndex}`, driveUrl);
             userRow.set(`Audio ${chunkIndex} Status`, 'Pending');
             userRow.set(`Audio ${chunkIndex} Feedback`, '');
             await userRow.save();
