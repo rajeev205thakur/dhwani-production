@@ -130,10 +130,6 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
-import { v2 as cloudinary } from 'cloudinary';
-
-// Configure cloudinary (automatically uses CLOUDINARY_URL from env)
-cloudinary.config({ secure: true });
 
 // 2. Upload Audio Chunk
 app.post('/api/upload-audio', upload.single('audio'), async (req, res) => {
