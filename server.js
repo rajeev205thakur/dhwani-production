@@ -194,15 +194,15 @@ app.post('/api/upload-audio', upload.single('audio'), async (req, res) => {
           const userRow = rows.find(r => r.get('Email ID') === email && (r.get('Language') || 'Not Assigned') === language);
           if (userRow) {
             userRow.set(`Audio ${chunkIndex}`, driveUrl);
-            userRow.set(`Audio ${chunkIndex} Status`, 'Pending');
+            userRow.set(`Audio ${chunkIndex} Status`, 'In Review');
             userRow.set(`Audio ${chunkIndex} Feedback`, '');
             await userRow.save();
           }
         }
-        res.json({ success: true, message: 'Audio processed and saved to Google Drive', status: 'Pending' });
+        res.json({ success: true, message: 'Audio processed and saved to Google Drive', status: 'In Review' });
       } catch (error) {
         console.error('Error during upload/sheet update:', error);
-        res.json({ success: true, message: 'Audio saved, but update failed', status: 'Pending' });
+        res.json({ success: true, message: 'Audio saved, but update failed', status: 'In Review' });
       }
     })
     .on('error', (err) => {
