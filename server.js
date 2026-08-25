@@ -124,6 +124,99 @@ app.post('/api/login', async (req, res) => {
 });
 
 
+// Basic queue to prevent Out-Of-Memory crashes from concurrent ffmpeg/base64 conversions
+const uploadQueue = [];
+let isProcessingQueue = false;
+
+const processUploadQueue = async () => {
+  if (isProcessingQueue || uploadQueue.length === 0) return;
+  isProcessingQueue = true;
+
+  const task = uploadQueue.shift();
+  try {
+    await new Promise((resolve, reject) => {
+      ffmpeg(task.filePath)
+        .toFormat('wav')
+        .audioChannels(1)
+        .audioFrequency(44100)
+        .audioCodec('pcm_s16le')
+        .on('end', async () => {
+          console.log(`Successfully converted ${task.filePath} to ${task.outputPath}`);
+          if (fs.existsSync(task.filePath)) fs.unlinkSync(task.filePath);
+
+          try {
+            const fileBuffer = fs.readFileSync(task.outputPath);
+            const base64Audio = fileBuffer.toString('base64');
+            
+            console.log('Uploading to Google Drive via Apps Script...');
+            const gasUrl = 'https://script.google.com/macros/s/AKfycbzh-jOOR4k3JJkVwYb0bgBH2wjCaTc3jCLRUgNSyLq7XxKvAd7CArYL8TUf8HaqNzDh/exec';
+            
+            const gasResponse = await fetch(gasUrl, {
+              method: 'POST',
+              body: JSON.stringify({
+                filename: path.basename(task.outputPath),
+                base64Audio: base64Audio
+              })
+            });
+
+            const gasData = await gasResponse.json();
+            
+            if (!gasData.success) {
+              throw new Error(gasData.error || 'Failed to upload to Drive via GAS');
+            }
+
+            const driveUrl = gasData.url || 'URL_NOT_RETURNED';
+            
+            if (fs.existsSync(task.outputPath)) fs.unlinkSync(task.outputPath);
+
+            const sheet = await getSheet();
+            if (sheet) {
+              await sheet.loadHeaderRow();
+              const headerValues = sheet.headerValues;
+              let headersChanged = false;
+              const requiredHeaders = [`Audio ${task.chunkIndex}`, `Audio ${task.chunkIndex} Status`, `Audio ${task.chunkIndex} Feedback`];
+              for (const header of requiredHeaders) {
+                if (!headerValues.includes(header)) {
+                  headerValues.push(header);
+                  headersChanged = true;
+                }
+              }
+              if (headersChanged) {
+                await sheet.setHeaderRow(headerValues);
+              }
+
+              const rows = await sheet.getRows();
+              const userRow = rows.find(r => r.get('Email ID') === task.email && (r.get('Language') || 'Not Assigned') === task.language);
+              if (userRow) {
+                userRow.set(`Audio ${task.chunkIndex}`, driveUrl);
+                userRow.set(`Audio ${task.chunkIndex} Status`, 'In Review');
+                userRow.set(`Audio ${task.chunkIndex} Feedback`, '');
+                await userRow.save();
+              }
+            }
+            console.log('Background task finished successfully.');
+            resolve();
+          } catch (error) {
+            console.error('Error during background processing:', error);
+            resolve(); // Resolve anyway to unblock queue
+          }
+        })
+        .on('error', (err) => {
+          console.error('FFmpeg error:', err);
+          if (fs.existsSync(task.filePath)) fs.unlinkSync(task.filePath);
+          resolve(); // Unblock queue
+        })
+        .save(task.outputPath);
+    });
+  } catch (err) {
+    console.error("Queue task error:", err);
+  }
+
+  isProcessingQueue = false;
+  // Process next item if any
+  processUploadQueue();
+};
+
 // 2. Upload Audio Chunk
 app.post('/api/upload-audio', upload.single('audio'), async (req, res) => {
   const { email, chunkIndex, language } = req.body; 
@@ -139,77 +232,16 @@ app.post('/api/upload-audio', upload.single('audio'), async (req, res) => {
   // Send success response immediately to prevent Render timeout
   res.json({ success: true, message: 'Audio uploaded successfully. Processing in background...', status: 'In Review' });
 
-  // Process audio in the background
-  ffmpeg(file.path)
-    .toFormat('wav')
-    .audioChannels(1)
-    .audioFrequency(44100)
-    .audioCodec('pcm_s16le')
-    .on('end', async () => {
-      console.log(`Successfully converted ${file.path} to ${outputPath}`);
-      if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
-
-      try {
-        const fileBuffer = fs.readFileSync(outputPath);
-        const base64Audio = fileBuffer.toString('base64');
-        
-        console.log('Uploading to Google Drive via Apps Script...');
-        const gasUrl = 'https://script.google.com/macros/s/AKfycbzh-jOOR4k3JJkVwYb0bgBH2wjCaTc3jCLRUgNSyLq7XxKvAd7CArYL8TUf8HaqNzDh/exec';
-        
-        const gasResponse = await fetch(gasUrl, {
-          method: 'POST',
-          body: JSON.stringify({
-            filename: outputFilename,
-            base64Audio: base64Audio
-          })
-        });
-
-        const gasData = await gasResponse.json();
-        console.log('Google Apps Script Response:', gasData);
-        
-        if (!gasData.success) {
-          throw new Error(gasData.error || 'Failed to upload to Drive via GAS');
-        }
-
-        const driveUrl = gasData.url || 'URL_NOT_RETURNED';
-        
-        if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
-
-        const sheet = await getSheet();
-        if (sheet) {
-          // Check and add missing headers
-          await sheet.loadHeaderRow();
-          const headerValues = sheet.headerValues;
-          let headersChanged = false;
-          const requiredHeaders = [`Audio ${chunkIndex}`, `Audio ${chunkIndex} Status`, `Audio ${chunkIndex} Feedback`];
-          for (const header of requiredHeaders) {
-            if (!headerValues.includes(header)) {
-              headerValues.push(header);
-              headersChanged = true;
-            }
-          }
-          if (headersChanged) {
-            await sheet.setHeaderRow(headerValues);
-          }
-
-          const rows = await sheet.getRows();
-          const userRow = rows.find(r => r.get('Email ID') === email && (r.get('Language') || 'Not Assigned') === language);
-          if (userRow) {
-            userRow.set(`Audio ${chunkIndex}`, driveUrl);
-            userRow.set(`Audio ${chunkIndex} Status`, 'In Review');
-            userRow.set(`Audio ${chunkIndex} Feedback`, '');
-            await userRow.save();
-          }
-        }
-        console.log('Audio processed and saved to Google Drive and Sheet successfully in background.');
-      } catch (error) {
-        console.error('Error during background upload/sheet update:', error);
-      }
-    })
-    .on('error', (err) => {
-      console.error('FFmpeg error:', err);
-    })
-    .save(outputPath);
+  // Add to queue and trigger processing
+  uploadQueue.push({
+    email,
+    chunkIndex,
+    language,
+    filePath: file.path,
+    outputPath
+  });
+  
+  processUploadQueue();
 });
 
 app.listen(PORT, '0.0.0.0', () => {
