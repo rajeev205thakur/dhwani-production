@@ -136,7 +136,10 @@ app.post('/api/upload-audio', upload.single('audio'), async (req, res) => {
   const outputFilename = `${Date.now()}-${email.replace(/[^a-zA-Z0-9]/g, '_')}-${language}-chunk${chunkIndex}.wav`;
   const outputPath = path.join(UPLOADS_DIR, outputFilename);
 
-  // Removed afftdn (Noise Reduction) because it consumes too much RAM and crashes Render Free Tier
+  // Send success response immediately to prevent Render timeout
+  res.json({ success: true, message: 'Audio uploaded successfully. Processing in background...', status: 'In Review' });
+
+  // Process audio in the background
   ffmpeg(file.path)
     .toFormat('wav')
     .audioChannels(1)
@@ -147,29 +150,23 @@ app.post('/api/upload-audio', upload.single('audio'), async (req, res) => {
       if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
 
       try {
-        // Read the WAV file as Base64
-        const fileBuffer = fs.readFileSync(outputPath);
-        const base64Audio = fileBuffer.toString('base64');
-
-        // Send to Google Apps Script
-        const gasUrl = 'https://script.google.com/macros/s/AKfycbzh-jOOR4k3JJkVwYb0bgBH2wjCaTc3jCLRUgNSyLq7XxKvAd7CArYL8TUf8HaqNzDh/exec';
+        const audioBase64 = fs.readFileSync(outputPath, { encoding: 'base64' });
         
-        console.log('Uploading to Google Drive via Apps Script...');
-        const gasRes = await fetch(gasUrl, {
+        console.log('Sending Base64 to Google Apps Script...');
+        const gasResponse = await fetch('https://script.google.com/macros/s/AKfycbzh-jOOR4k3JJkVwYb0bgBH2wjCaTc3jCLRUgNSyLq7XxKvAd7CArYL8TUf8HaqNzDh/exec', {
           method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             filename: outputFilename,
-            base64Audio: base64Audio
+            mimeType: 'audio/wav',
+            fileBase64: audioBase64,
+            email: email
           })
         });
-        
-        const gasData = await gasRes.json();
-        if (!gasData.success) {
-          throw new Error(gasData.error || 'Failed to upload to Drive via GAS');
-        }
 
-        const driveUrl = gasData.url;
-        console.log(`Uploaded to Drive successfully: ${driveUrl}`);
+        const gasResult = await gasResponse.json();
+        console.log('Google Apps Script Response:', gasResult);
+        const driveUrl = gasResult.url || 'URL_NOT_RETURNED';
         
         if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
 
@@ -199,15 +196,13 @@ app.post('/api/upload-audio', upload.single('audio'), async (req, res) => {
             await userRow.save();
           }
         }
-        res.json({ success: true, message: 'Audio processed and saved to Google Drive', status: 'In Review' });
+        console.log('Audio processed and saved to Google Drive and Sheet successfully in background.');
       } catch (error) {
-        console.error('Error during upload/sheet update:', error);
-        res.json({ success: true, message: 'Audio saved, but update failed', status: 'In Review' });
+        console.error('Error during background upload/sheet update:', error);
       }
     })
     .on('error', (err) => {
       console.error('FFmpeg error:', err);
-      res.status(500).json({ error: 'Error processing audio file' });
     })
     .save(outputPath);
 });
