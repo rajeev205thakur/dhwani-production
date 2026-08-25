@@ -150,23 +150,28 @@ app.post('/api/upload-audio', upload.single('audio'), async (req, res) => {
       if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
 
       try {
-        const audioBase64 = fs.readFileSync(outputPath, { encoding: 'base64' });
+        const fileBuffer = fs.readFileSync(outputPath);
+        const base64Audio = fileBuffer.toString('base64');
         
-        console.log('Sending Base64 to Google Apps Script...');
-        const gasResponse = await fetch('https://script.google.com/macros/s/AKfycbzh-jOOR4k3JJkVwYb0bgBH2wjCaTc3jCLRUgNSyLq7XxKvAd7CArYL8TUf8HaqNzDh/exec', {
+        console.log('Uploading to Google Drive via Apps Script...');
+        const gasUrl = 'https://script.google.com/macros/s/AKfycbzh-jOOR4k3JJkVwYb0bgBH2wjCaTc3jCLRUgNSyLq7XxKvAd7CArYL8TUf8HaqNzDh/exec';
+        
+        const gasResponse = await fetch(gasUrl, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             filename: outputFilename,
-            mimeType: 'audio/wav',
-            fileBase64: audioBase64,
-            email: email
+            base64Audio: base64Audio
           })
         });
 
-        const gasResult = await gasResponse.json();
-        console.log('Google Apps Script Response:', gasResult);
-        const driveUrl = gasResult.url || 'URL_NOT_RETURNED';
+        const gasData = await gasResponse.json();
+        console.log('Google Apps Script Response:', gasData);
+        
+        if (!gasData.success) {
+          throw new Error(gasData.error || 'Failed to upload to Drive via GAS');
+        }
+
+        const driveUrl = gasData.url || 'URL_NOT_RETURNED';
         
         if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
 
