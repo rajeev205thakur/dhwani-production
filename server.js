@@ -82,23 +82,30 @@ app.post('/api/login', async (req, res) => {
     if (userRows.length > 0) {
       const profiles = userRows.map(row => {
         const chunks = [];
-        let i = 1;
-        while (true) {
+        // Find max chunk index by inspecting headers
+        let maxChunk = 0;
+        sheet.headerValues.forEach(h => {
+          const match = h.match(/^Audio (\d+)$/);
+          if (match) {
+            maxChunk = Math.max(maxChunk, parseInt(match[1]));
+          }
+        });
+
+        for (let i = 1; i <= maxChunk; i++) {
           const statusVal = row.get(`Audio ${i}`);
-          if (statusVal !== undefined && statusVal !== null && statusVal !== '') {
-             const clientStatus = row.get(`Audio ${i} Status`);
-             const feedback = row.get(`Audio ${i} Feedback`);
-             chunks.push({
+          const clientStatus = row.get(`Audio ${i} Status`);
+          const feedback = row.get(`Audio ${i} Feedback`);
+          
+          if (statusVal || clientStatus) {
+            chunks.push({
                index: i,
                link: typeof statusVal === 'string' ? statusVal.replace('=HYPERLINK("', '').replace('", "Listen")', '') : statusVal,
                status: clientStatus || null,
                feedback: feedback || null
-             });
-             i++;
-          } else {
-             break;
+            });
           }
         }
+
         return {
           language: row.get('Language') || 'Not Assigned',
           chunks
@@ -169,32 +176,43 @@ const processUploadQueue = async () => {
             
             if (fs.existsSync(task.outputPath)) fs.unlinkSync(task.outputPath);
 
-            const sheet = await getSheet();
-            if (sheet) {
-              await sheet.loadHeaderRow();
-              const headerValues = sheet.headerValues;
-              let headersChanged = false;
-              const requiredHeaders = [`Audio ${task.chunkIndex}`, `Audio ${task.chunkIndex} Status`, `Audio ${task.chunkIndex} Feedback`];
-              for (const header of requiredHeaders) {
-                if (!headerValues.includes(header)) {
-                  headerValues.push(header);
-                  headersChanged = true;
-                }
-              }
-              if (headersChanged) {
-                await sheet.setHeaderRow(headerValues);
-              }
+            let retries = 3;
+            while (retries > 0) {
+              try {
+                const sheet = await getSheet();
+                if (sheet) {
+                  await sheet.loadHeaderRow();
+                  const headerValues = sheet.headerValues;
+                  let headersChanged = false;
+                  const requiredHeaders = [`Audio ${task.chunkIndex}`, `Audio ${task.chunkIndex} Status`, `Audio ${task.chunkIndex} Feedback`];
+                  for (const header of requiredHeaders) {
+                    if (!headerValues.includes(header)) {
+                      headerValues.push(header);
+                      headersChanged = true;
+                    }
+                  }
+                  if (headersChanged) {
+                    await sheet.setHeaderRow(headerValues);
+                  }
 
-              const rows = await sheet.getRows();
-              const userRow = rows.find(r => r.get('Email ID') === task.email && (r.get('Language') || 'Not Assigned') === task.language);
-              if (userRow) {
-                userRow.set(`Audio ${task.chunkIndex}`, driveUrl);
-                userRow.set(`Audio ${task.chunkIndex} Status`, 'In Review');
-                userRow.set(`Audio ${task.chunkIndex} Feedback`, '');
-                await userRow.save();
+                  const rows = await sheet.getRows();
+                  const userRow = rows.find(r => r.get('Email ID') === task.email && (r.get('Language') || 'Not Assigned') === task.language);
+                  if (userRow) {
+                    userRow.set(`Audio ${task.chunkIndex}`, driveUrl);
+                    userRow.set(`Audio ${task.chunkIndex} Status`, 'In Review');
+                    userRow.set(`Audio ${task.chunkIndex} Feedback`, '');
+                    await userRow.save();
+                  }
+                }
+                console.log('Background task finished successfully and saved to sheet.');
+                break; // Break retry loop on success
+              } catch (sheetErr) {
+                console.error(`Sheet update failed. Retries left: ${retries - 1}`, sheetErr);
+                retries--;
+                if (retries === 0) throw sheetErr;
+                await new Promise(r => setTimeout(r, 3000)); // wait 3s before retry
               }
             }
-            console.log('Background task finished successfully.');
             resolve();
           } catch (error) {
             console.error('Error during background processing:', error);
@@ -230,7 +248,7 @@ app.post('/api/upload-audio', upload.single('audio'), async (req, res) => {
   const outputPath = path.join(UPLOADS_DIR, outputFilename);
 
   // Send success response immediately to prevent Render timeout
-  res.json({ success: true, message: 'Audio uploaded successfully. Processing in background...', status: 'In Review' });
+  res.json({ success: true, message: 'Audio uploaded successfully. Processing in background...', status: 'Processing' });
 
   // Add to queue and trigger processing
   uploadQueue.push({
