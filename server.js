@@ -53,9 +53,19 @@ const getSheet = async () => {
 
   const doc = new GoogleSpreadsheet(process.env.GOOGLE_SHEET_ID, auth);
   await doc.loadInfo();
-  const sheet = doc.sheetsByTitle['Production Batch'];
+  
+  // Robust tab finding (ignores case and spaces)
+  let sheet = null;
+  for (let i = 0; i < doc.sheetCount; i++) {
+    const s = doc.sheetsByIndex[i];
+    if (s.title.trim().toLowerCase() === 'production batch') {
+      sheet = s;
+      break;
+    }
+  }
+
   if (!sheet) {
-    console.error("Tab 'Production Batch' not found!");
+    console.error("Tab 'Production Batch' not found! Please check Google Sheet tab names.");
   }
   return sheet;
 };
@@ -81,7 +91,10 @@ app.post('/api/login', async (req, res) => {
     }
 
     const rows = await sheet.getRows();
-    const userRows = rows.filter(r => r.get('Email ID') === email);
+    const userRows = rows.filter(r => {
+      const rEmail = r.get('Email ID') || '';
+      return rEmail.trim().toLowerCase() === email.trim().toLowerCase();
+    });
 
     if (userRows.length > 0) {
       const profiles = userRows.map(row => {
@@ -146,12 +159,24 @@ const processUploadQueue = async () => {
   const task = uploadQueue.shift();
   try {
     await new Promise((resolve, reject) => {
+      // Set a 3-minute timeout for ffmpeg to prevent queue deadlock
+      let isResolved = false;
+      const timeout = setTimeout(() => {
+        if (!isResolved) {
+          isResolved = true;
+          console.error(`FFmpeg timed out after 3 minutes for ${task.filePath}`);
+          resolve(); // Resolve to unblock queue
+        }
+      }, 180000);
+
       ffmpeg(task.filePath)
         .toFormat('wav')
         .audioChannels(1)
         .audioFrequency(44100)
         .audioCodec('pcm_s16le')
         .on('end', async () => {
+          if (isResolved) return;
+          clearTimeout(timeout);
           console.log(`Successfully converted ${task.filePath} to ${task.outputPath}`);
           if (fs.existsSync(task.filePath)) fs.unlinkSync(task.filePath);
 
@@ -159,16 +184,33 @@ const processUploadQueue = async () => {
             const fileBuffer = fs.readFileSync(task.outputPath);
             const base64Audio = fileBuffer.toString('base64');
             
+            if (fs.existsSync(task.outputPath)) fs.unlinkSync(task.outputPath);
+
             console.log('Uploading to Google Drive via Apps Script...');
             const gasUrl = 'https://script.google.com/macros/s/AKfycbzh-jOOR4k3JJkVwYb0bgBH2wjCaTc3jCLRUgNSyLq7XxKvAd7CArYL8TUf8HaqNzDh/exec';
             
-            const gasResponse = await fetch(gasUrl, {
-              method: 'POST',
-              body: JSON.stringify({
-                filename: path.basename(task.outputPath),
-                base64Audio: base64Audio
-              })
-            });
+            // Add a 4-minute timeout to the GAS fetch to prevent deadlocks
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 240000);
+
+            let gasResponse;
+            try {
+              gasResponse = await fetch(gasUrl, {
+                method: 'POST',
+                body: JSON.stringify({
+                  filename: path.basename(task.outputPath),
+                  base64Audio: base64Audio
+                }),
+                signal: controller.signal
+              });
+            } catch (fetchErr) {
+              if (fetchErr.name === 'AbortError') {
+                throw new Error('Google Apps Script upload timed out after 4 minutes');
+              }
+              throw fetchErr;
+            } finally {
+              clearTimeout(timeoutId);
+            }
 
             const gasData = await gasResponse.json();
             
@@ -234,9 +276,12 @@ const processUploadQueue = async () => {
           }
         })
         .on('error', (err) => {
-          console.error('FFmpeg error:', err);
+          if (isResolved) return;
+          clearTimeout(timeout);
+          console.error('Error processing audio:', err);
           if (fs.existsSync(task.filePath)) fs.unlinkSync(task.filePath);
-          resolve(); // Unblock queue
+          if (fs.existsSync(task.outputPath)) fs.unlinkSync(task.outputPath);
+          resolve(); // Resolve anyway to unblock queue
         })
         .save(task.outputPath);
     });
