@@ -196,16 +196,26 @@ const processUploadQueue = async () => {
                   }
 
                   const rows = await sheet.getRows();
-                  const userRow = rows.find(r => r.get('Email ID') === task.email && (r.get('Language') || 'Not Assigned') === task.language);
-                  if (userRow) {
-                    userRow.set(`Audio ${task.chunkIndex}`, driveUrl);
-                    userRow.set(`Audio ${task.chunkIndex} Status`, 'In Review');
-                    userRow.set(`Audio ${task.chunkIndex} Feedback`, '');
-                    await userRow.save();
+                  // Match robustly by Email ID (ignore case and spacing), skip language matching just to be safe
+                  const userRows = rows.filter(r => {
+                    const rEmail = r.get('Email ID') || '';
+                    return rEmail.trim().toLowerCase() === task.email.trim().toLowerCase();
+                  });
+                  
+                  if (userRows.length > 0) {
+                    for (const userRow of userRows) {
+                      userRow.set(`Audio ${task.chunkIndex}`, driveUrl);
+                      userRow.set(`Audio ${task.chunkIndex} Status`, 'In Review');
+                      userRow.set(`Audio ${task.chunkIndex} Feedback`, '');
+                      await userRow.save();
+                    }
+                    console.log(`Background task finished successfully and saved to sheet for ${task.email}.`);
+                    break; // Break retry loop on success
+                  } else {
+                    console.error(`User row not found in sheet for email: ${task.email}`);
+                    break; // No point retrying if row doesn't exist
                   }
                 }
-                console.log('Background task finished successfully and saved to sheet.');
-                break; // Break retry loop on success
               } catch (sheetErr) {
                 console.error(`Sheet update failed. Retries left: ${retries - 1}`, sheetErr);
                 retries--;
