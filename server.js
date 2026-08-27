@@ -53,7 +53,11 @@ const getSheet = async () => {
 
   const doc = new GoogleSpreadsheet(process.env.GOOGLE_SHEET_ID, auth);
   await doc.loadInfo();
-  return doc.sheetsByIndex[0]; // Assuming data is in the first tab
+  const sheet = doc.sheetsByTitle['Production Batch'];
+  if (!sheet) {
+    console.error("Tab 'Production Batch' not found!");
+  }
+  return sheet;
 };
 
 // --- API Endpoints ---
