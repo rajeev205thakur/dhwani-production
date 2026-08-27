@@ -242,10 +242,12 @@ const processUploadQueue = async () => {
                   }
 
                   const rows = await sheet.getRows();
-                  // Match robustly by Email ID (ignore case and spacing), skip language matching just to be safe
+                  // Match robustly by Email ID AND Language (ignore case and spacing)
                   const userRows = rows.filter(r => {
                     const rEmail = r.get('Email ID') || '';
-                    return rEmail.trim().toLowerCase() === task.email.trim().toLowerCase();
+                    const rLang = r.get('Language') || 'Not Assigned';
+                    return rEmail.trim().toLowerCase() === task.email.trim().toLowerCase() &&
+                           rLang.trim().toLowerCase() === task.language.trim().toLowerCase();
                   });
                   
                   if (userRows.length > 0) {
